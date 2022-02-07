@@ -19,7 +19,13 @@ import trio
 async def getch_iterator():
     """Return an interator of keypresses from getch"""
     while True:
-        yield await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
+        ch = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
+        # Handle special chars by sending a byte string prefixed with 0xE0
+        if ch[0] == 0 or ch[0] == 0xE0:
+            ch2 = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
+            # Prefix 0xE0 to the front.
+            ch = b'\xE0' + ch2
+        yield ch
 
 def make_query_packet():
     """Construct a UDP packet suitable for querying an NTP server to ask for
