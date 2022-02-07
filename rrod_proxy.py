@@ -1,5 +1,5 @@
 # Required packages:
-# `python -m pip install trio`
+# `python -m pip install trio colorama termcolor`
 
 
 # If you want to use IPv6, then:
@@ -11,7 +11,64 @@ import datetime
 import msvcrt
 import struct
 
+from colorama import init
+from termcolor import cprint
 import trio
+
+# Set up terminal coloring for Windows
+init()
+
+class TcpProxy:
+    def __init__(self, client_port, server_ip, server_port):
+        self.client_port = client_port
+        self.server_ip = server_ip
+        self.server_port = server_port
+
+    async def run(self):
+        # Create a TCP socket to listen locally
+        with trio.socket.socket(
+            family=trio.socket.AF_INET,     # IPv4
+            type=trio.socket.SOCK_STREAM,   # TCP
+        ) as client_sock:
+            # NOTE: This binds to ONLY the localhost interface, so nothing outside of this local host can connect to it!
+            await client_sock.bind(("127.0.0.1", self.client_port))
+            client_sock.listen()
+
+            # This loop will reconnect things whenever the client socket drops, so we don't have to keep restarting this proxy for every connection:
+            while True:
+                (conn, addr) = await client_sock.accept()
+                # NOTE: We *could* spawn off multiple child tasks here and open multiple parallel connections with accept() but we _don't_ for
+                # simplicity and because the goal of this proxy is to study/manipulate the connection (rather than actually be a proxy):
+                with conn:
+                    print(f"Connected by {addr}, connecting to {self.server_ip}:{self.server_port}")
+                    with trio.socket.socket(
+                        family=trio.socket.AF_INET,     # IPv4
+                        type=trio.socket.SOCK_STREAM,   # TCP
+                    ) as server_sock:
+                        await server_sock.connect((self.server_ip, self.server_port))
+
+                        async def server_recv_loop():
+                            # Loop forever, sending received traffic to the client
+                            while True:
+                                data = await server_sock.recv(4096)
+                                if not data:
+                                    break
+                                cprint("Client <--- Server\n" + data.hex(' '), 'red')
+                                await conn.send(data)
+
+                        async def client_recv_loop():
+                            # Loop forever, sending received traffic to the server
+                            while True:
+                                data = await conn.recv(4096)
+                                if not data:
+                                    break
+                                cprint("Client ---> Server\n" + data.hex(' '), 'green')
+                                await server_sock.send(data)
+
+                        async with trio.open_nursery() as nursery:
+                            nursery.start_soon(server_recv_loop)
+                            nursery.start_soon(client_recv_loop)
+
 
 # THIS IS WINDOWS-ONLY!
 # For a Linux-based version, things get a little easier and you can just use "select" type things to read from stdin,
@@ -27,91 +84,14 @@ async def getch_iterator():
             ch = b'\xE0' + ch2
         yield ch
 
-def make_query_packet():
-    """Construct a UDP packet suitable for querying an NTP server to ask for
-    the current time."""
-
-    # The structure of an NTP packet is described here:
-    #   https://tools.ietf.org/html/rfc5905#page-19
-    # They're always 48 bytes long, unless you're using extensions, which we
-    # aren't.
-    packet = bytearray(48)
-
-    # The first byte contains 3 subfields:
-    # first 2 bits: 11, leap second status unknown
-    # next 3 bits: 100, NTP version indicator, 0b100 == 4 = version 4
-    # last 3 bits: 011, NTP mode indicator, 0b011 == 3 == "client"
-    packet[0] = 0b11100011
-
-    # For an outgoing request, all other fields can be left as zeros.
-
-    return packet
-
-def extract_transmit_timestamp(ntp_packet):
-    """Given an NTP packet, extract the "transmit timestamp" field, as a
-    Python datetime."""
-
-    # The transmit timestamp is the time that the server sent its response.
-    # It's stored in bytes 40-47 of the NTP packet. See:
-    #   https://tools.ietf.org/html/rfc5905#page-19
-    encoded_transmit_timestamp = ntp_packet[40:48]
-
-    # The timestamp is stored in the "NTP timestamp format", which is a 32
-    # byte count of whole seconds, followed by a 32 byte count of fractions of
-    # a second. See:
-    #   https://tools.ietf.org/html/rfc5905#page-13
-    seconds, fraction = struct.unpack("!II", encoded_transmit_timestamp)
-
-    # The timestamp is the number of seconds since January 1, 1900 (ignoring
-    # leap seconds). To convert it to a datetime object, we do some simple
-    # datetime arithmetic:
-    base_time = datetime.datetime(1900, 1, 1)
-    offset = datetime.timedelta(seconds=seconds + fraction / 2**32)
-    return base_time + offset
-
-async def print_responses(udp_sock):
-    while True:
-        # We accept packets up to 1024 bytes long (though in practice NTP
-        # packets will be much shorter).
-        data, address = await udp_sock.recvfrom(1024)
-        print("Got response from:", address)
-        transmit_timestamp = extract_transmit_timestamp(data)
-        print("Their clock read (in UTC):", transmit_timestamp)
-
 async def main():
-    print("Our clock currently reads (in UTC):", datetime.datetime.utcnow())
-
-    # Look up some random NTP servers.
-    # (See www.pool.ntp.org for information about the NTP pool.)
-    servers = await trio.socket.getaddrinfo(
-        "pool.ntp.org",               # host
-        "ntp",                        # port
-        family=trio.socket.AF_INET,   # IPv4
-        type=trio.socket.SOCK_DGRAM,  # UDP
-    )
-
-    # Construct an NTP query packet.
-    query_packet = make_query_packet()
-
-    # Create a UDP socket
-    udp_sock = trio.socket.socket(
-        family=trio.socket.AF_INET,   # IPv4
-        type=trio.socket.SOCK_DGRAM,  # UDP
-    )
-
-    # Use the socket to send the query packet to each of the servers.
-    print("-- Sending queries --")
-    for server in servers:
-        address = server[-1]
-        print("Sending to:", address)
-        await udp_sock.sendto(query_packet, address)
+    #tcp_proxy = TcpProxy(prt, "remote_ip", prt)
 
     # Read responses from the socket.
-    print("-- Reading responses (for 100 seconds or until 'q' is pressed) --")
-    with trio.move_on_after(100):
+    with trio.move_on_after(1000):
         async with trio.open_nursery() as nursery:
 
-            nursery.start_soon(print_responses, udp_sock)
+            nursery.start_soon(tcp_proxy.run)
 
             async for key in getch_iterator():
                 print(f"Got key: '{key}'")
