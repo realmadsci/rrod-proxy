@@ -1,5 +1,6 @@
 # Required packages:
 # `python -m pip install trio colorama termcolor`
+import argparse
 import msvcrt
 
 from colorama import init
@@ -140,7 +141,18 @@ async def getch_iterator():
 
 
 async def main():
-    # tcp_proxy = TcpProxy(prt, "ip", prt)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "client_port", help="Local machine port for client to connect to"
+    )
+    parser.add_argument(
+        "remote_ip", help="Remote (server) IP address for proxy to connect to"
+    )
+    parser.add_argument(
+        "remote_port", help="Remote (server) port for proxy to connect to"
+    )
+    args = parser.parse_args()
+    tcp_proxy = TcpProxy(args.client_port, args.remote_ip, args.remote_port)
 
     async with trio.open_nursery() as root_nursery:
 
