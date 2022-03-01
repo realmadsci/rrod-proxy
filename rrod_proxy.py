@@ -11,6 +11,65 @@ import trio
 init()
 
 
+class RrodMessageSplitter:
+    def __init__(self):
+        self.data = b""
+
+    def _compute_length(self, data):
+        i = 0
+        shift = 0
+        length = 0
+
+        while len(data) > i:
+            d = data[i]
+            length |= (d & 0x7F) << shift
+            shift += 7
+            i += 1
+            if not (d & 0x80):
+                return (i, length)
+
+        return (0, 0)
+
+    def process(self, data):
+        messages = []
+        # Append the new data
+        self.data = self.data + data
+        (hdr_len, length) = self._compute_length(self.data)
+
+        while hdr_len and len(self.data) >= hdr_len + length:
+            # If we have enough for a full message, strip off
+            # the "length" header and return the message:
+            messages.append(self.data[hdr_len : hdr_len + length])
+            self.data = self.data[hdr_len + length :]
+            (hdr_len, length) = self._compute_length(self.data)
+
+        return messages
+
+
+def add_header(data):
+    """
+    Add header "length field" to outgoing RRoD messages.
+    """
+    # Get the length
+    l = len(data)
+
+    # Split it into groups of 7 bits per group, in little endian order:
+    h = bytearray()
+
+    # Grab 7 bits and shift down:
+    h.append(l & 0x7F)
+    l >>= 7
+    while l:
+        h.append(l & 0x7F)
+        l >>= 7
+
+    # Set the MSb of all except the last byte:
+    for i in range(len(h) - 1):
+        h[i] |= 0x80
+
+    return h + data
+
+
 async def handle_keypress(key, client, server):
     """
     Handle keypresses
@@ -20,7 +79,11 @@ async def handle_keypress(key, client, server):
 
     NOTE: The Esc key b"\x1b" and Ctrl-C b"\x03" are already taken to mean "exit" so you'll never see them in here!
     """
-    cprint(f"Got key: '{key}'", "yellow")
+    # TODO: INSERT SKETCHY BUSINESS HERE TO ADD SOME TRAFFIC?
+    cprint(f"Got unused key: {key}", "yellow")
+
+
+client_splitter = RrodMessageSplitter()
 
 
 async def handle_client_to_server_data(data, client, server):
@@ -31,8 +94,17 @@ async def handle_client_to_server_data(data, client, server):
     `await server.send(data)`
     or you can do fancier things, even including spoofing data back to the client if you wish.
     """
-    cprint("Client ---> Server\n" + data.hex(" "), "green")
-    await server.send(data)
+    msgs = client_splitter.process(data)
+    for m in msgs:
+        cprint("Client ---> Server\n" + m.hex(" "), "green")
+
+        # TODO: INSERT SKETCHY BUSINESS HERE TO ANALYZE AND/OR MODIFY TRAFFIC!
+
+        # Send the message to the server
+        await server.send(add_header(m))
+
+
+server_splitter = RrodMessageSplitter()
 
 
 async def handle_server_to_client_data(data, client, server):
@@ -43,8 +115,14 @@ async def handle_server_to_client_data(data, client, server):
     `await client.send(data)`
     or you can do fancier things, even including spoofing data back to the server if you wish.
     """
-    cprint("Client <--- Server\n" + data.hex(" "), "blue")
-    await client.send(data)
+    msgs = server_splitter.process(data)
+    for m in msgs:
+        cprint("Client <--- Server\n" + m.hex(" "), "blue")
+
+        # TODO: INSERT SKETCHY BUSINESS HERE TO ANALYZE AND/OR MODIFY TRAFFIC!
+
+        # Send the message to the client
+        await client.send(add_header(m))
 
 
 class TcpProxy:
