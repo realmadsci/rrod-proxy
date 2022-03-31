@@ -1,7 +1,7 @@
 # Required packages:
 # `python -m pip install trio colorama termcolor`
 import argparse
-import msvcrt
+import os
 
 from colorama import init
 from termcolor import cprint
@@ -202,20 +202,55 @@ class TcpProxy:
                             nursery.start_soon(server_recv_loop, nursery.cancel_scope)
                             nursery.start_soon(client_recv_loop, nursery.cancel_scope)
 
+if os.name == "nt":
+    # Windows keypress handling
+    import msvcrt
+    async def keyboard():
+        """Return an interator of keypresses from getch"""
+        while True:
+            ch = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
+            # Handle special chars by sending a byte string prefixed with 0xE0
+            if ch[0] == 0 or ch[0] == 0xE0:
+                ch2 = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
+                # Prefix 0xE0 to the front.
+                ch = b"\xE0" + ch2
+            yield ch
 
-# THIS IS WINDOWS-ONLY!
-# For a Linux-based version, things get a little easier and you can just use "select" type things to read from stdin,
-# or something like this: https://stackoverflow.com/a/56640807
-async def getch_iterator():
-    """Return an interator of keypresses from getch"""
-    while True:
-        ch = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
-        # Handle special chars by sending a byte string prefixed with 0xE0
-        if ch[0] == 0 or ch[0] == 0xE0:
-            ch2 = await trio.to_thread.run_sync(msvcrt.getch, cancellable=True)
-            # Prefix 0xE0 to the front.
-            ch = b"\xE0" + ch2
-        yield ch
+else:
+    # Linux keypress handling
+    import termios
+    import sys
+    import tty
+    async def keyboard():
+        #"""Return an iterator of characters from stdin."""
+        # In Linux, we can use non-blocking keyboard input as a file-type stream rather
+        # than needing janky background threads!
+        keystream = trio.lowlevel.FdStream(os.dup(sys.stdin.fileno()))
+
+        # Set up the terminal to return keys immediately
+        stashed_term = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin, termios.TCSANOW)
+            while True:
+                try:
+                    ch = await keystream.receive_some(1)
+
+                    # Detect and group the escape sequences
+                    # NOTE: Linux and Windows will have different sequences for special keys!
+                    if (ch == b"\x1b"):
+                        # The escape codes don't seem to have a standard "end delimiter"
+                        # so just keep accepting chars until a gap occurs. :shrug:
+                        while True:
+                            with trio.move_on_after(0.01) as cancel_scope:
+                                ch += await keystream.receive_some(1)
+                            if (cancel_scope.cancelled_caught):
+                                break
+
+                    yield ch
+                except KeyboardInterrupt:
+                    yield b"\x03"
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, stashed_term)
 
 
 async def main():
@@ -238,7 +273,7 @@ async def main():
         root_nursery.start_soon(tcp_proxy.run)
 
         # Handle keypresses
-        async for key in getch_iterator():
+        async for key in keyboard():
             if key == b"\x1b" or key == b"\x03":
                 cprint(f"Received escape key. Exiting...", "red")
                 root_nursery.cancel_scope.cancel()
